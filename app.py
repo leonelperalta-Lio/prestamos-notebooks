@@ -23,7 +23,7 @@ def init_db():
     conn = get_connection()
     c = conn.cursor()
     
-    # Tabla de Inventario (Notebooks, Auriculares, etc.)
+    # Tabla de Inventario
     c.execute('''
         CREATE TABLE IF NOT EXISTS inventario (
             id_item TEXT PRIMARY KEY,
@@ -55,7 +55,7 @@ def init_db():
     
     conn.commit()
     
-    # Importar automáticamente desde Excel si la tabla inventario está vacía
+    # Importar automáticamente desde Excel si la tabla está vacía
     c.execute("SELECT COUNT(*) FROM inventario")
     count = c.fetchone()[0]
     if count == 0 and os.path.exists("Registro de Notebooks.xlsx"):
@@ -90,11 +90,38 @@ def obtener_items_disponibles(categoria):
     conn.close()
     return df
 
-# --- INTERFAZ PRINCIPAL DE LA APLICACIÓN ---
+def obtener_prestamos_activos():
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM prestamos WHERE estado = 'En Uso' ORDER BY id DESC", conn)
+    conn.close()
+    return df
+
+# --- INTERFAZ PRINCIPAL ---
 st.title("💻 Sistema de Préstamos de Equipamiento Escolar")
 st.markdown("Gestión digital e informatizada para el préstamo de notebooks, auriculares y otros insumos dentro del centro.")
 
-# Menú lateral para navegación
+# -------------------------------------------------------------------
+# 🚨 SISTEMA DE ALERTA VISUAL (Cierre de Jornada a partir de las 18:00 hs)
+# -------------------------------------------------------------------
+df_activos_alerta = obtener_prestamos_activos()
+hora_actual = datetime.now().time()
+HORA_LIMITE = datetime.strptime("18:00:00", "%H:%M:%S").time()
+
+if not df_activos_alerta.empty:
+    cant_pendientes = len(df_activos_alerta)
+    if hora_actual >= HORA_LIMITE:
+        st.error(
+            f"🚨 **¡ATENCIÓN - HORARIO LÍMITE SUPERADO (18:00 HS)!**  \n"
+            f"Hay **{cant_pendientes} equipo(s) prestado(s)** que aún NO han sido devueltos. "
+            f"Por favor, dirígete a la pestaña **'Recursos en Uso / Devolución'** para registrarlos."
+        )
+    else:
+        st.warning(
+            f"⚠️ **Aviso de Préstamos Activos:** "
+            f"Actualmente hay **{cant_pendientes} equipo(s) en uso**. Recuerda registrarlos antes de las 18:00 hs."
+        )
+
+# --- MENÚ LATERAL ---
 st.sidebar.header("⚙️ Menú de Opciones")
 menu = st.sidebar.radio(
     "Navegación",
@@ -107,7 +134,6 @@ menu = st.sidebar.radio(
 if menu == "📌 Registrar Préstamo":
     st.header("📝 Formulario de Solicitud de Recurso")
     
-    # Cargar categorías disponibles en el inventario
     df_inv = obtener_inventario()
     
     if df_inv.empty:
@@ -117,9 +143,8 @@ if menu == "📌 Registrar Préstamo":
         
         col_cat, col_info = st.columns([1, 2])
         with col_cat:
-            categoria_sel = st.selectbox("1. Tipo de Articulo a Prestar", categorias)
+            categoria_sel = st.selectbox("1. Tipo de Artículo a Prestar", categorias)
         
-        # Obtener items disponibles para esa categoria
         df_disponibles = obtener_items_disponibles(categoria_sel)
         
         if df_disponibles.empty:
@@ -165,20 +190,19 @@ if menu == "📌 Registrar Préstamo":
                         conn = get_connection()
                         c = conn.cursor()
                         
-                        # Registrar el préstamo
                         c.execute('''
                             INSERT INTO prestamos 
                             (id_item, nombre_item, categoria, alumno, curso, origen, aula_destino, con_cargador, fecha_prestamo, estado)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'En Uso')
                         ''', (item_id, item_nombre, categoria_sel, alumno.strip(), curso.strip(), origen.strip(), aula_destino.strip(), cargador_str, fecha_actual))
                         
-                        # Cambiar estado en inventario
                         c.execute("UPDATE inventario SET estado_item = 'En Uso' WHERE id_item = ?", (item_id,))
                         
                         conn.commit()
                         conn.close()
                         
                         st.success(f"🎉 ¡Préstamo registrado exitosamente! Recurso **{item_nombre}** ({item_id}) asignado a **{alumno}**.")
+                        st.rerun()
 
 # -------------------------------------------------------------------
 # PESTAÑA 2: RECURSOS EN USO / DEVOLUCIÓN
@@ -186,16 +210,13 @@ if menu == "📌 Registrar Préstamo":
 elif menu == "🔄 Recursos en Uso / Devolución":
     st.header("🔄 Recursos Actualmente Prestados")
     
-    conn = get_connection()
-    df_activos = pd.read_sql_query("SELECT * FROM prestamos WHERE estado = 'En Uso' ORDER BY id DESC", conn)
-    conn.close()
+    df_activos = obtener_prestamos_activos()
     
     if df_activos.empty:
         st.info("🎉 Excelente. No hay recursos prestados en este momento. Todo el material está disponible.")
     else:
         st.markdown(f"Hay **{len(df_activos)}** recurso(s) actualmente prestado(s).")
         
-        # Filtro rápido por categoría
         cats = ["Todos"] + sorted(df_activos['categoria'].unique().tolist())
         cat_filtro = st.selectbox("Filtrar por categoría:", cats)
         
@@ -208,7 +229,7 @@ elif menu == "🔄 Recursos en Uso / Devolución":
                 
                 with col1:
                     st.subheader(f"💻 {row['nombre_item']}")
-                    st.caption(f"ID: **{row['id_item']}** | Categoria: {row['categoria']}")
+                    st.caption(f"ID: **{row['id_item']}** | Categoría: {row['categoria']}")
                 
                 with col2:
                     st.markdown(f"👤 **Alumno:** {row['alumno']}")
@@ -225,10 +246,7 @@ elif menu == "🔄 Recursos en Uso / Devolución":
                         conn = get_connection()
                         c = conn.cursor()
                         
-                        # Actualizar tabla de prestamos
                         c.execute("UPDATE prestamos SET estado = 'Devuelto', fecha_devolucion = ? WHERE id = ?", (fecha_dev, row['id']))
-                        
-                        # Actualizar estado del inventario
                         c.execute("UPDATE inventario SET estado_item = 'Disponible' WHERE id_item = ?", (row['id_item'],))
                         
                         conn.commit()
@@ -251,7 +269,6 @@ elif menu == "📜 Histórico de Préstamos":
     if df_todos.empty:
         st.info("No hay registros de préstamos archivados todavía.")
     else:
-        # Buscador y filtros
         col_busqueda, col_filtro_est = st.columns([2, 1])
         with col_busqueda:
             search_query = st.text_input("🔍 Buscar por Alumno, Curso, ID o Nombre de equipo:")
@@ -274,7 +291,6 @@ elif menu == "📜 Histórico de Préstamos":
             
         st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
         
-        # Botón para descargar reporte en Excel
         csv = df_filtrado.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Descargar Registro (CSV/Excel)",
@@ -304,7 +320,7 @@ elif menu == "📦 Gestión de Inventario":
             c1, c2 = st.columns(2)
             
             with c1:
-                nuevo_id = st.text_input("ID o Código del Articulo (ej. AR02000... / AUR-001) *")
+                nuevo_id = st.text_input("ID o Código del Artículo (ej. AR02000... / AUR-001) *")
                 nombre_eq = st.text_input("Nombre o Modelo del Recurso (ej. Bangho133-PC25 / Auriculares Redragon) *")
             
             with c2:
@@ -330,6 +346,7 @@ elif menu == "📦 Gestión de Inventario":
                         ''', (nuevo_id.strip(), nombre_eq.strip(), cat_elegida.strip(), ubicacion_org.strip()))
                         conn.commit()
                         st.success(f"✅ ¡Artículo **{nombre_eq}** ({nuevo_id}) agregado exitosamente al inventario!")
+                        st.rerun()
                     except sqlite3.IntegrityError:
                         st.error(f"❌ El ID **{nuevo_id}** ya existe en el inventario. Por favor utiliza un ID único.")
                     finally:
