@@ -171,11 +171,27 @@ if menu == "📌 Registrar Préstamo":
                     origen = st.text_input("De dónde salió la Notebook/Artículo *", value=origen_defecto)
                     aula_destino = st.text_input("Aula / Espacio de Destino (ej. Aula 12, Laboratorio) *")
                     
+                    # --- ACCESORIOS (CARGADOR Y MOUSE) ---
                     if categoria_sel == "Notebook":
-                        lleva_cargador = st.checkbox("¿Se entrega CON cargador?", value=False)
-                        cargador_str = "Con Cargador" if lleva_cargador else "Solo Notebook"
+                        st.markdown("**Accesorios incluidos:**")
+                        col_acc1, col_acc2 = st.columns(2)
+                        with col_acc1:
+                            lleva_cargador = st.checkbox("🔌 ¿Con cargador?", value=False)
+                        with col_acc2:
+                            lleva_mouse = st.checkbox("🖱️ ¿Con mouse?", value=False)
+                        
+                        acc_list = []
+                        if lleva_cargador:
+                            acc_list.append("Cargador")
+                        if lleva_mouse:
+                            acc_list.append("Mouse")
+                        
+                        if acc_list:
+                            accesorios_str = " + ".join(acc_list)
+                        else:
+                            accesorios_str = "Solo Notebook"
                     else:
-                        cargador_str = "N/A"
+                        accesorios_str = "N/A"
                 
                 submitted = st.form_submit_button("✅ Registrar y Prestar Recurso")
                 
@@ -194,7 +210,7 @@ if menu == "📌 Registrar Préstamo":
                             INSERT INTO prestamos 
                             (id_item, nombre_item, categoria, alumno, curso, origen, aula_destino, con_cargador, fecha_prestamo, estado)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'En Uso')
-                        ''', (item_id, item_nombre, categoria_sel, alumno.strip(), curso.strip(), origen.strip(), aula_destino.strip(), cargador_str, fecha_actual))
+                        ''', (item_id, item_nombre, categoria_sel, alumno.strip(), curso.strip(), origen.strip(), aula_destino.strip(), accesorios_str, fecha_actual))
                         
                         c.execute("UPDATE inventario SET estado_item = 'En Uso' WHERE id_item = ?", (item_id,))
                         
@@ -237,7 +253,7 @@ elif menu == "🔄 Recursos en Uso / Devolución":
                 
                 with col3:
                     st.markdown(f"📍 **Origen:** {row['origen']} ➔ **Aula:** {row['aula_destino']}")
-                    st.markdown(f"🔌 **Accesorios:** {row['con_cargador']}")
+                    st.markdown(f"📦 **Accesorios:** {row['con_cargador']}")
                     st.markdown(f"⏱️ **Fecha/Hora:** {row['fecha_prestamo']}")
                 
                 with col4:
