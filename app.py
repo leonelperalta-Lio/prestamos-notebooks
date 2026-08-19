@@ -4,6 +4,18 @@ import pandas as pd
 from datetime import datetime
 import os
 
+# Intentar importar pytz para la zona horaria de Argentina
+try:
+    import pytz
+    TZ_ARG = pytz.timezone("America/Argentina/Buenos_Aires")
+except ImportError:
+    TZ_ARG = None
+
+def obtener_fecha_hora_actual():
+    if TZ_ARG:
+        return datetime.now(TZ_ARG)
+    return datetime.now()
+
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(
     page_title="Sistema de Gestión y Préstamo de Recursos",
@@ -55,10 +67,8 @@ def init_db():
     
     conn.commit()
     
-    # Importar automáticamente desde Excel si la tabla está vacía
-    c.execute("SELECT COUNT(*) FROM inventario")
-    count = c.fetchone()[0]
-    if count == 0 and os.path.exists("Registro de Notebooks.xlsx"):
+    # Sincronización inteligente: Agrega lo del Excel SOLO si no existe en la BD
+    if os.path.exists("Registro de Notebooks.xlsx"):
         try:
             df = pd.read_excel("Registro de Notebooks.xlsx", sheet_name="Notebooks")
             for _, row in df.iterrows():
@@ -71,7 +81,7 @@ def init_db():
                 ''', (id_item, nombre, ubicacion))
             conn.commit()
         except Exception as e:
-            st.error(f"Error al importar archivo Excel inicial: {e}")
+            pass
             
     conn.close()
 
@@ -101,10 +111,11 @@ st.title("💻 Sistema de Préstamos de Equipamiento Escolar")
 st.markdown("Gestión digital e informatizada para el préstamo de notebooks, auriculares y otros insumos dentro del centro.")
 
 # -------------------------------------------------------------------
-# 🚨 SISTEMA DE ALERTA VISUAL (Cierre de Jornada a partir de las 18:00 hs)
+# 🚨 SISTEMA DE ALERTA VISUAL (Cierre de Jornada a partir de las 18:00 hs - Hora Argentina)
 # -------------------------------------------------------------------
 df_activos_alerta = obtener_prestamos_activos()
-hora_actual = datetime.now().time()
+ahora_local = obtener_fecha_hora_actual()
+hora_actual = ahora_local.time()
 HORA_LIMITE = datetime.strptime("18:00:00", "%H:%M:%S").time()
 
 if not df_activos_alerta.empty:
@@ -171,7 +182,6 @@ if menu == "📌 Registrar Préstamo":
                     origen = st.text_input("De dónde salió la Notebook/Artículo *", value=origen_defecto)
                     aula_destino = st.text_input("Aula / Espacio de Destino (ej. Aula 12, Laboratorio) *")
                     
-                    # --- ACCESORIOS (CARGADOR Y MOUSE) ---
                     if categoria_sel == "Notebook":
                         st.markdown("**Accesorios incluidos:**")
                         col_acc1, col_acc2 = st.columns(2)
@@ -199,7 +209,7 @@ if menu == "📌 Registrar Préstamo":
                     if not alumno.strip() or not curso.strip() or not origen.strip() or not aula_destino.strip():
                         st.error("⚠️ Por favor completa todos los campos obligatorios (*).")
                     else:
-                        fecha_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        fecha_actual = obtener_fecha_hora_actual().strftime("%Y-%m-%d %H:%M:%S")
                         item_id = selected_item['id_item']
                         item_nombre = selected_item['nombre_equipo']
                         
@@ -258,7 +268,7 @@ elif menu == "🔄 Recursos en Uso / Devolución":
                 
                 with col4:
                     if st.button("↩️ Devolver Recurso", key=f"dev_{row['id']}"):
-                        fecha_dev = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        fecha_dev = obtener_fecha_hora_actual().strftime("%Y-%m-%d %H:%M:%S")
                         conn = get_connection()
                         c = conn.cursor()
                         
@@ -285,16 +295,27 @@ elif menu == "📜 Histórico de Préstamos":
     if df_todos.empty:
         st.info("No hay registros de préstamos archivados todavía.")
     else:
-        col_busqueda, col_filtro_est = st.columns([2, 1])
-        with col_busqueda:
-            search_query = st.text_input("🔍 Buscar por Alumno, Curso, ID o Nombre de equipo:")
-        with col_filtro_est:
-            estado_filtro = st.selectbox("Estado del préstamo:", ["Todos", "En Uso", "Devuelto"])
+        # Convertir a datetime para poder filtrar por mes
+        df_todos['fecha_dt'] = pd.to_datetime(df_todos['fecha_prestamo'], errors='coerce')
+        df_todos['mes_año'] = df_todos['fecha_dt'].dt.strftime('%Y-%m')
+        
+        meses_disponibles = ["Todos los meses"] + sorted(df_todos['mes_año'].dropna().unique().tolist(), reverse=True)
+        
+        c_busq, c_est, c_mes = st.columns([2, 1, 1])
+        with c_busq:
+            search_query = st.text_input("🔍 Buscar por Alumno, Curso, ID o Nombre:")
+        with c_est:
+            estado_filtro = st.selectbox("Estado:", ["Todos", "En Uso", "Devuelto"])
+        with c_mes:
+            mes_filtro = st.selectbox("Filtrar por Mes:", meses_disponibles)
             
         df_filtrado = df_todos.copy()
         
         if estado_filtro != "Todos":
             df_filtrado = df_filtrado[df_filtrado['estado'] == estado_filtro]
+            
+        if mes_filtro != "Todos los meses":
+            df_filtrado = df_filtrado[df_filtrado['mes_año'] == mes_filtro]
             
         if search_query.strip():
             sq = search_query.strip().lower()
@@ -305,13 +326,16 @@ elif menu == "📜 Histórico de Préstamos":
                 df_filtrado['nombre_item'].str.lower().str.contains(sq)
             ]
             
-        st.dataframe(df_filtrado, use_container_width=True, hide_index=True)
+        # Ocultar columnas auxiliares creadas para el filtro
+        df_mostrar = df_filtrado.drop(columns=['fecha_dt', 'mes_año'], errors='ignore')
         
-        csv = df_filtrado.to_csv(index=False).encode('utf-8')
+        st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+        
+        csv = df_mostrar.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Descargar Registro (CSV/Excel)",
             data=csv,
-            file_name=f"historico_prestamos_{datetime.now().strftime('%Y%m%d')}.csv",
+            file_name=f"historico_prestamos_{obtener_fecha_hora_actual().strftime('%Y%m%d')}.csv",
             mime="text/csv",
         )
 
