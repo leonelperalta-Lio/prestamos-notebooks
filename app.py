@@ -34,7 +34,6 @@ def init_supabase() -> Client:
 supabase = init_supabase()
 
 def init_db_data():
-    # Sincronización inicial del Excel si el inventario está vacío
     res = supabase.table("inventario").select("id_item", count="exact").execute()
     if res.count == 0 and os.path.exists("Registro de Notebooks.xlsx"):
         try:
@@ -75,7 +74,7 @@ st.markdown("Gestión digital e informatizada respaldada en la nube (Supabase)."
 # 🚨 SISTEMA DE ALERTA VISUAL
 df_activos_alerta = obtener_prestamos_activos()
 ahora_local = obtener_fecha_hora_actual()
-hora_actual = ahora_local.time()
+hora_actual = me_time = ahora_local.time()
 HORA_LIMITE = datetime.strptime("18:00:00", "%H:%M:%S").time()
 
 if not df_activos_alerta.empty:
@@ -123,58 +122,47 @@ if menu == "📌 Registrar Préstamo":
                 label = f"{row['id_item']} | {row['nombre_equipo']} ({row['ubicacion_origen']})"
                 options_dict[label] = row
             
-            # Cargar auriculares disponibles en la BD si la categoría seleccionada es Notebook
-            df_auriculares = pd.DataFrame()
-            if categoria_sel == "Notebook":
-                df_auriculares = obtener_items_disponibles("Auriculares")
+            st.subheader("2. Selección de Recurso y Accesorios")
+            col_sel1, col_sel2 = st.columns(2)
             
-            with st.form("form_prestamo", clear_on_submit=True):
-                st.subheader("2. Datos del Préstamo y Alumno")
+            with col_sel1:
+                item_label = st.selectbox("Seleccionar Recurso Disponible", list(options_dict.keys()))
+                selected_item = options_dict[item_label]
+            
+            # Gestión de accesorios fuera del formulario para respuesta en tiempo real
+            auricular_seleccionado = None
+            lleva_cargador = False
+            lleva_mouse = False
+            lleva_auriculares = False
+
+            with col_sel2:
+                if categoria_sel == "Notebook":
+                    st.write("**Accesorios a incluir:**")
+                    c_a1, c_a2, c_a3 = st.columns(3)
+                    with c_a1: lleva_cargador = st.checkbox("🔌 Cargador")
+                    with c_a2: lleva_mouse = st.checkbox("🖱️ Mouse")
+                    with c_a3: lleva_auriculares = st.checkbox("🎧 Auriculares")
+                    
+                    if lleva_auriculares:
+                        df_auric = obtener_items_disponibles("Auriculares")
+                        if df_auric.empty:
+                            st.warning("⚠️ No hay auriculares disponibles.")
+                        else:
+                            opts_auric = [f"{r['id_item']} | {r['nombre_equipo']}" for _, r in df_auric.iterrows()]
+                            auricular_seleccionado = st.selectbox("Seleccionar Auriculares:", opts_auric)
+
+            # Formulario para los datos del alumno y confirmación
+            with st.form("form_datos_alumno", clear_on_submit=True):
+                st.subheader("3. Datos del Préstamo y Alumno")
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    item_label = st.selectbox("Seleccionar Recurso Disponible", list(options_dict.keys()))
                     alumno = st.text_input("Nombre y Apellido del Alumno/a *")
                     curso = st.text_input("Curso / División del Alumno/a *")
                 
                 with col2:
-                    selected_item = options_dict[item_label]
-                    origen = st.text_input("De dónde salió la Notebook/Artículo *", value=selected_item['ubicacion_origen'])
+                    origen = st.text_input("De dónde salió el Recurso *", value=selected_item['ubicacion_origen'])
                     aula_destino = st.text_input("Aula / Espacio de Destino *")
-                    
-                    auricular_seleccionado = None
-                    if categoria_sel == "Notebook":
-                        col_acc1, col_acc2, col_acc3 = st.columns(3)
-                        with col_acc1:
-                            lleva_cargador = st.checkbox("🔌 ¿Con cargador?", value=False)
-                        with col_acc2:
-                            lleva_mouse = st.checkbox("🖱️ ¿Con mouse?", value=False)
-                        with col_acc3:
-                            lleva_auriculares = st.checkbox("🎧 ¿Con auriculares?", value=False)
-                        
-                        # Si se tildan auriculares, desplegar la lista de opciones disponibles
-                        if lleva_auriculares:
-                            if df_auriculares.empty:
-                                st.warning("⚠️ No hay auriculares cargados o disponibles en el inventario.")
-                            else:
-                                options_auric = [
-                                    f"{row['id_item']} | {row['nombre_equipo']}" 
-                                    for _, row in df_auriculares.iterrows()
-                                ]
-                                auricular_seleccionado = st.selectbox("Seleccionar Código de Auriculares:", options_auric)
-
-                        acc_list = []
-                        if lleva_cargador: acc_list.append("Cargador")
-                        if lleva_mouse: acc_list.append("Mouse")
-                        if lleva_auriculares:
-                            if auricular_seleccionado:
-                                acc_list.append(f"Auriculares ({auricular_seleccionado})")
-                            else:
-                                acc_list.append("Auriculares")
-                        
-                        accesorios_str = " + ".join(acc_list) if acc_list else "Solo Notebook"
-                    else:
-                        accesorios_str = "N/A"
                 
                 submitted = st.form_submit_button("✅ Registrar y Prestar Recurso")
                 
@@ -182,11 +170,25 @@ if menu == "📌 Registrar Préstamo":
                     if not alumno.strip() or not curso.strip() or not origen.strip() or not aula_destino.strip():
                         st.error("⚠️ Por favor completa todos los campos obligatorios (*).")
                     else:
+                        # Construir string de accesorios
+                        if categoria_sel == "Notebook":
+                            acc_list = []
+                            if lleva_cargador: acc_list.append("Cargador")
+                            if lleva_mouse: acc_list.append("Mouse")
+                            if lleva_auriculares:
+                                if auricular_seleccionado:
+                                    acc_list.append(f"Auriculares ({auricular_seleccionado})")
+                                else:
+                                    acc_list.append("Auriculares")
+                            accesorios_str = " + ".join(acc_list) if acc_list else "Solo Notebook"
+                        else:
+                            accesorios_str = "N/A"
+
                         fecha_actual = obtener_fecha_hora_actual().strftime("%Y-%m-%d %H:%M:%S")
                         item_id = selected_item['id_item']
                         item_nombre = selected_item['nombre_equipo']
                         
-                        # Insertar préstamo en Supabase
+                        # Registrar en Supabase
                         supabase.table("prestamos").insert({
                             "id_item": item_id,
                             "nombre_item": item_nombre,
@@ -200,15 +202,15 @@ if menu == "📌 Registrar Préstamo":
                             "estado": "En Uso"
                         }).execute()
                         
-                        # Actualizar estado de la Notebook a "En Uso"
+                        # Actualizar estado del ítem a "En Uso"
                         supabase.table("inventario").update({"estado_item": "En Uso"}).eq("id_item", item_id).execute()
                         
-                        # Si se seleccionaron auriculares específicos, también los marca como "En Uso"
+                        # Si se seleccionó un auricular, marcarlo también como "En Uso"
                         if categoria_sel == "Notebook" and lleva_auriculares and auricular_seleccionado:
                             auric_id = auricular_seleccionado.split(" | ")[0]
                             supabase.table("inventario").update({"estado_item": "En Uso"}).eq("id_item", auric_id).execute()
                         
-                        st.success(f"🎉 ¡Préstamo registrado exitosamente! Recurso **{item_nombre}** asignado a **{alumno}**.")
+                        st.success(f"🎉 ¡Préstamo registrado exitosamente para **{alumno}**!")
                         st.rerun()
 
 # -------------------------------------------------------------------
@@ -251,7 +253,7 @@ elif menu == "🔄 Recursos en Uso / Devolución":
                         # Devolver el ítem principal a "Disponible"
                         supabase.table("inventario").update({"estado_item": "Disponible"}).eq("id_item", row['id_item']).execute()
                         
-                        # Si incluía auriculares, extraer ID y devolverlos a "Disponible"
+                        # Si incluía auriculares específicos, liberarlos también
                         acc_text = str(row['con_cargador'])
                         if "Auriculares (" in acc_text:
                             try:
