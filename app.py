@@ -123,6 +123,11 @@ if menu == "📌 Registrar Préstamo":
                 label = f"{row['id_item']} | {row['nombre_equipo']} ({row['ubicacion_origen']})"
                 options_dict[label] = row
             
+            # Cargar auriculares disponibles en la BD si la categoría seleccionada es Notebook
+            df_auriculares = pd.DataFrame()
+            if categoria_sel == "Notebook":
+                df_auriculares = obtener_items_disponibles("Auriculares")
+            
             with st.form("form_prestamo", clear_on_submit=True):
                 st.subheader("2. Datos del Préstamo y Alumno")
                 col1, col2 = st.columns(2)
@@ -137,16 +142,36 @@ if menu == "📌 Registrar Préstamo":
                     origen = st.text_input("De dónde salió la Notebook/Artículo *", value=selected_item['ubicacion_origen'])
                     aula_destino = st.text_input("Aula / Espacio de Destino *")
                     
+                    auricular_seleccionado = None
                     if categoria_sel == "Notebook":
-                        col_acc1, col_acc2 = st.columns(2)
+                        col_acc1, col_acc2, col_acc3 = st.columns(3)
                         with col_acc1:
                             lleva_cargador = st.checkbox("🔌 ¿Con cargador?", value=False)
                         with col_acc2:
                             lleva_mouse = st.checkbox("🖱️ ¿Con mouse?", value=False)
+                        with col_acc3:
+                            lleva_auriculares = st.checkbox("🎧 ¿Con auriculares?", value=False)
                         
+                        # Si se tildan auriculares, desplegar la lista de opciones disponibles
+                        if lleva_auriculares:
+                            if df_auriculares.empty:
+                                st.warning("⚠️ No hay auriculares cargados o disponibles en el inventario.")
+                            else:
+                                options_auric = [
+                                    f"{row['id_item']} | {row['nombre_equipo']}" 
+                                    for _, row in df_auriculares.iterrows()
+                                ]
+                                auricular_seleccionado = st.selectbox("Seleccionar Código de Auriculares:", options_auric)
+
                         acc_list = []
                         if lleva_cargador: acc_list.append("Cargador")
                         if lleva_mouse: acc_list.append("Mouse")
+                        if lleva_auriculares:
+                            if auricular_seleccionado:
+                                acc_list.append(f"Auriculares ({auricular_seleccionado})")
+                            else:
+                                acc_list.append("Auriculares")
+                        
                         accesorios_str = " + ".join(acc_list) if acc_list else "Solo Notebook"
                     else:
                         accesorios_str = "N/A"
@@ -175,8 +200,13 @@ if menu == "📌 Registrar Préstamo":
                             "estado": "En Uso"
                         }).execute()
                         
-                        # Actualizar estado en inventario
+                        # Actualizar estado de la Notebook a "En Uso"
                         supabase.table("inventario").update({"estado_item": "En Uso"}).eq("id_item", item_id).execute()
+                        
+                        # Si se seleccionaron auriculares específicos, también los marca como "En Uso"
+                        if categoria_sel == "Notebook" and lleva_auriculares and auricular_seleccionado:
+                            auric_id = auricular_seleccionado.split(" | ")[0]
+                            supabase.table("inventario").update({"estado_item": "En Uso"}).eq("id_item", auric_id).execute()
                         
                         st.success(f"🎉 ¡Préstamo registrado exitosamente! Recurso **{item_nombre}** asignado a **{alumno}**.")
                         st.rerun()
@@ -215,8 +245,20 @@ elif menu == "🔄 Recursos en Uso / Devolución":
                     if st.button("↩️ Devolver Recurso", key=f"dev_{row['id']}"):
                         fecha_dev = obtener_fecha_hora_actual().strftime("%Y-%m-%d %H:%M:%S")
                         
+                        # Actualizar estado del préstamo
                         supabase.table("prestamos").update({"estado": "Devuelto", "fecha_devolucion": fecha_dev}).eq("id", row['id']).execute()
+                        
+                        # Devolver el ítem principal a "Disponible"
                         supabase.table("inventario").update({"estado_item": "Disponible"}).eq("id_item", row['id_item']).execute()
+                        
+                        # Si incluía auriculares, extraer ID y devolverlos a "Disponible"
+                        acc_text = str(row['con_cargador'])
+                        if "Auriculares (" in acc_text:
+                            try:
+                                auric_id = acc_text.split("Auriculares (")[1].split(" |")[0]
+                                supabase.table("inventario").update({"estado_item": "Disponible"}).eq("id_item", auric_id).execute()
+                            except Exception:
+                                pass
                         
                         st.success(f"✅ El recurso **{row['nombre_item']}** fue devuelto correctamente.")
                         st.rerun()
