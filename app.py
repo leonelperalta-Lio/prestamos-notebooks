@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from supabase import create_client, Client
+from sqlalchemy import create_engine, text
 import os
 
 # Intentar importar pytz para la zona horaria de Argentina
@@ -24,57 +24,95 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CONEXIÓN A SUPABASE ---
+# --- CONEXIÓN A NEON (POSTGRESQL) ---
 @st.cache_resource
-def init_supabase() -> Client:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+def init_db_engine():
+    # Cadena de conexión desde .streamlit/secrets.toml
+    db_url = st.secrets["postgres"]["url"]
+    return create_engine(db_url)
 
-supabase = init_supabase()
+engine = init_db_engine()
+
+# --- CREACIÓN E INICIALIZACIÓN DE TABLAS ---
+def init_tables():
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS inventario (
+                id_item VARCHAR(50) PRIMARY KEY,
+                nombre_equipo VARCHAR(100) NOT NULL,
+                categoria VARCHAR(50) NOT NULL,
+                ubicacion_origen VARCHAR(100) NOT NULL,
+                estado_item VARCHAR(30) NOT NULL DEFAULT 'Disponible'
+            );
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS prestamos (
+                id SERIAL PRIMARY KEY,
+                id_item VARCHAR(50) NOT NULL,
+                nombre_item VARCHAR(100) NOT NULL,
+                categoria VARCHAR(50) NOT NULL,
+                alumno VARCHAR(100) NOT NULL,
+                curso VARCHAR(50) NOT NULL,
+                origen VARCHAR(100) NOT NULL,
+                aula_destino VARCHAR(100) NOT NULL,
+                con_cargador VARCHAR(150),
+                fecha_prestamo VARCHAR(50) NOT NULL,
+                fecha_devolucion VARCHAR(50),
+                estado VARCHAR(30) NOT NULL DEFAULT 'En Uso'
+            );
+        """))
+
+init_tables()
 
 def init_db_data():
-    res = supabase.table("inventario").select("id_item", count="exact").execute()
-    if res.count == 0 and os.path.exists("Registro de Notebooks.xlsx"):
+    df_inv = obtener_inventario()
+    if df_inv.empty and os.path.exists("Registro de Notebooks.xlsx"):
         try:
             df = pd.read_excel("Registro de Notebooks.xlsx", sheet_name="Notebooks")
-            items = []
-            for _, row in df.iterrows():
-                items.append({
-                    "id_item": str(row['ID_Notebook']).strip(),
-                    "nombre_equipo": str(row['Marca y equipo']).strip(),
-                    "categoria": "Notebook",
-                    "ubicacion_origen": str(row['Ubicacion']).strip(),
-                    "estado_item": "Disponible"
-                })
-            if items:
-                supabase.table("inventario").upsert(items).execute()
+            with engine.begin() as conn:
+                for _, row in df.iterrows():
+                    conn.execute(text("""
+                        INSERT INTO inventario (id_item, nombre_equipo, categoria, ubicacion_origen, estado_item)
+                        VALUES (:id, :nombre, 'Notebook', :ubicacion, 'Disponible')
+                        ON CONFLICT (id_item) DO NOTHING;
+                    """), {
+                        "id": str(row['ID_Notebook']).strip(),
+                        "nombre": str(row['Marca y equipo']).strip(),
+                        "ubicacion": str(row['Ubicacion']).strip()
+                    })
         except Exception as e:
             st.error(f"Error cargando Excel inicial: {e}")
 
-init_db_data()
-
 # --- FUNCIONES DE BASE DE DATOS ---
 def obtener_inventario():
-    res = supabase.table("inventario").select("*").execute()
-    return pd.DataFrame(res.data)
+    with engine.connect() as conn:
+        return pd.read_sql(text("SELECT * FROM inventario"), conn)
 
 def obtener_items_disponibles(categoria):
-    res = supabase.table("inventario").select("*").eq("categoria", categoria).eq("estado_item", "Disponible").execute()
-    return pd.DataFrame(res.data)
+    with engine.connect() as conn:
+        return pd.read_sql(
+            text("SELECT * FROM inventario WHERE categoria = :cat AND estado_item = 'Disponible'"),
+            conn,
+            params={"cat": categoria}
+        )
 
 def obtener_prestamos_activos():
-    res = supabase.table("prestamos").select("*").eq("estado", "En Uso").order("id", desc=True).execute()
-    return pd.DataFrame(res.data)
+    with engine.connect() as conn:
+        return pd.read_sql(
+            text("SELECT * FROM prestamos WHERE estado = 'En Uso' ORDER BY id DESC"),
+            conn
+        )
+
+init_db_data()
 
 # --- INTERFAZ PRINCIPAL ---
 st.title("💻 Sistema de Préstamos de Equipamiento Escolar")
-st.markdown("Gestión digital e informatizada respaldada en la nube (Supabase).")
+st.markdown("Gestión digital e informatizada en la nube (Neon PostgreSQL).")
 
 # 🚨 SISTEMA DE ALERTA VISUAL
 df_activos_alerta = obtener_prestamos_activos()
 ahora_local = obtener_fecha_hora_actual()
-hora_actual = me_time = ahora_local.time()
+hora_actual = ahora_local.time()
 HORA_LIMITE = datetime.strptime("18:00:00", "%H:%M:%S").time()
 
 if not df_activos_alerta.empty:
@@ -129,7 +167,6 @@ if menu == "📌 Registrar Préstamo":
                 item_label = st.selectbox("Seleccionar Recurso Disponible", list(options_dict.keys()))
                 selected_item = options_dict[item_label]
             
-            # Gestión de accesorios fuera del formulario para respuesta en tiempo real
             auricular_seleccionado = None
             lleva_cargador = False
             lleva_mouse = False
@@ -140,7 +177,7 @@ if menu == "📌 Registrar Préstamo":
                     st.write("**Accesorios a incluir:**")
                     c_a1, c_a2, c_a3 = st.columns(3)
                     with c_a1: lleva_cargador = st.checkbox("🔌 Cargador")
-                    with c_a2: lleva_mouse = st.checkbox("🖱️ Mouse")
+                    with c_a2: lleva_mouse = st.checkbox("🖱️️ Mouse")
                     with c_a3: lleva_auriculares = st.checkbox("🎧 Auriculares")
                     
                     if lleva_auriculares:
@@ -151,7 +188,6 @@ if menu == "📌 Registrar Préstamo":
                             opts_auric = [f"{r['id_item']} | {r['nombre_equipo']}" for _, r in df_auric.iterrows()]
                             auricular_seleccionado = st.selectbox("Seleccionar Auriculares:", opts_auric)
 
-            # Formulario para los datos del alumno y confirmación
             with st.form("form_datos_alumno", clear_on_submit=True):
                 st.subheader("3. Datos del Préstamo y Alumno")
                 col1, col2 = st.columns(2)
@@ -170,7 +206,6 @@ if menu == "📌 Registrar Préstamo":
                     if not alumno.strip() or not curso.strip() or not origen.strip() or not aula_destino.strip():
                         st.error("⚠️ Por favor completa todos los campos obligatorios (*).")
                     else:
-                        # Construir string de accesorios
                         if categoria_sel == "Notebook":
                             acc_list = []
                             if lleva_cargador: acc_list.append("Cargador")
@@ -188,27 +223,24 @@ if menu == "📌 Registrar Préstamo":
                         item_id = selected_item['id_item']
                         item_nombre = selected_item['nombre_equipo']
                         
-                        # Registrar en Supabase
-                        supabase.table("prestamos").insert({
-                            "id_item": item_id,
-                            "nombre_item": item_nombre,
-                            "categoria": categoria_sel,
-                            "alumno": alumno.strip(),
-                            "curso": curso.strip(),
-                            "origen": origen.strip(),
-                            "aula_destino": aula_destino.strip(),
-                            "con_cargador": accesorios_str,
-                            "fecha_prestamo": fecha_actual,
-                            "estado": "En Uso"
-                        }).execute()
-                        
-                        # Actualizar estado del ítem a "En Uso"
-                        supabase.table("inventario").update({"estado_item": "En Uso"}).eq("id_item", item_id).execute()
-                        
-                        # Si se seleccionó un auricular, marcarlo también como "En Uso"
-                        if categoria_sel == "Notebook" and lleva_auriculares and auricular_seleccionado:
-                            auric_id = auricular_seleccionado.split(" | ")[0]
-                            supabase.table("inventario").update({"estado_item": "En Uso"}).eq("id_item", auric_id).execute()
+                        with engine.begin() as conn:
+                            # Insertar préstamo
+                            conn.execute(text("""
+                                INSERT INTO prestamos (id_item, nombre_item, categoria, alumno, curso, origen, aula_destino, con_cargador, fecha_prestamo, estado)
+                                VALUES (:id_item, :nombre, :cat, :alumno, :curso, :origen, :destino, :acc, :fecha, 'En Uso')
+                            """), {
+                                "id_item": item_id, "nombre": item_nombre, "cat": categoria_sel,
+                                "alumno": alumno.strip(), "curso": curso.strip(), "origen": origen.strip(),
+                                "destino": aula_destino.strip(), "acc": accesorios_str, "fecha": fecha_actual
+                            })
+                            
+                            # Actualizar estado del ítem principal
+                            conn.execute(text("UPDATE inventario SET estado_item = 'En Uso' WHERE id_item = :id"), {"id": item_id})
+                            
+                            # Actualizar auriculares si corresponde
+                            if categoria_sel == "Notebook" and lleva_auriculares and auricular_seleccionado:
+                                auric_id = auricular_seleccionado.split(" | ")[0]
+                                conn.execute(text("UPDATE inventario SET estado_item = 'En Uso' WHERE id_item = :id"), {"id": auric_id})
                         
                         st.success(f"🎉 ¡Préstamo registrado exitosamente para **{alumno}**!")
                         st.rerun()
@@ -247,20 +279,23 @@ elif menu == "🔄 Recursos en Uso / Devolución":
                     if st.button("↩️ Devolver Recurso", key=f"dev_{row['id']}"):
                         fecha_dev = obtener_fecha_hora_actual().strftime("%Y-%m-%d %H:%M:%S")
                         
-                        # Actualizar estado del préstamo
-                        supabase.table("prestamos").update({"estado": "Devuelto", "fecha_devolucion": fecha_dev}).eq("id", row['id']).execute()
-                        
-                        # Devolver el ítem principal a "Disponible"
-                        supabase.table("inventario").update({"estado_item": "Disponible"}).eq("id_item", row['id_item']).execute()
-                        
-                        # Si incluía auriculares específicos, liberarlos también
-                        acc_text = str(row['con_cargador'])
-                        if "Auriculares (" in acc_text:
-                            try:
-                                auric_id = acc_text.split("Auriculares (")[1].split(" |")[0]
-                                supabase.table("inventario").update({"estado_item": "Disponible"}).eq("id_item", auric_id).execute()
-                            except Exception:
-                                pass
+                        with engine.begin() as conn:
+                            # Actualizar estado del préstamo
+                            conn.execute(text("""
+                                UPDATE prestamos SET estado = 'Devuelto', fecha_devolucion = :f_dev WHERE id = :id
+                            """), {"f_dev": fecha_dev, "id": row['id']})
+                            
+                            # Liberar ítem principal
+                            conn.execute(text("UPDATE inventario SET estado_item = 'Disponible' WHERE id_item = :id"), {"id": row['id_item']})
+                            
+                            # Liberar auriculares si aplica
+                            acc_text = str(row['con_cargador'])
+                            if "Auriculares (" in acc_text:
+                                try:
+                                    auric_id = acc_text.split("Auriculares (")[1].split(" |")[0]
+                                    conn.execute(text("UPDATE inventario SET estado_item = 'Disponible' WHERE id_item = :id"), {"id": auric_id})
+                                except Exception:
+                                    pass
                         
                         st.success(f"✅ El recurso **{row['nombre_item']}** fue devuelto correctamente.")
                         st.rerun()
@@ -271,8 +306,8 @@ elif menu == "🔄 Recursos en Uso / Devolución":
 # -------------------------------------------------------------------
 elif menu == "📜 Histórico de Préstamos":
     st.header("📜 Histórico y Registro Completo de Préstamos")
-    res = supabase.table("prestamos").select("*").order("id", desc=True).execute()
-    df_todos = pd.DataFrame(res.data)
+    with engine.connect() as conn:
+        df_todos = pd.read_sql(text("SELECT * FROM prestamos ORDER BY id DESC"), conn)
     
     if df_todos.empty:
         st.info("No hay registros de préstamos archivados todavía.")
@@ -334,14 +369,17 @@ elif menu == "📦 Gestión de Inventario":
                     st.error("⚠️ Completa los campos obligatorios para guardar el nuevo recurso.")
                 else:
                     try:
-                        supabase.table("inventario").insert({
-                            "id_item": nuevo_id.strip(),
-                            "nombre_equipo": nombre_eq.strip(),
-                            "categoria": cat_elegida.strip(),
-                            "ubicacion_origen": ubicacion_org.strip(),
-                            "estado_item": "Disponible"
-                        }).execute()
-                        st.success(f"✅ ¡Artículo **{nombre_eq}** agregado exitosamente a la nube!")
+                        with engine.begin() as conn:
+                            conn.execute(text("""
+                                INSERT INTO inventario (id_item, nombre_equipo, categoria, ubicacion_origen, estado_item)
+                                VALUES (:id, :nombre, :cat, :ubi, 'Disponible')
+                            """), {
+                                "id": nuevo_id.strip(),
+                                "nombre": nombre_eq.strip(),
+                                "cat": cat_elegida.strip(),
+                                "ubi": ubicacion_org.strip()
+                            })
+                        st.success(f"✅ ¡Artículo **{nombre_eq}** agregado exitosamente a la base de datos!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ Error al guardar. Verifica que el ID **{nuevo_id}** no exista previamente.")
